@@ -1,11 +1,14 @@
-import socket
+import contextlib
 import io
-import wave
-import numpy as np
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from base_speakers.audio_backend.base import AudioBackend
+import socket
 import threading
 import time
+import wave
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import numpy as np
+
+from base_speakers.audio_backend.base import AudioBackend
 
 
 def encode_wav(samples: np.ndarray, sample_rate: int) -> bytes:
@@ -17,6 +20,7 @@ def encode_wav(samples: np.ndarray, sample_rate: int) -> bytes:
         wf.setframerate(sample_rate)
         wf.writeframes(pcm.tobytes())
     return buf.getvalue()
+
 
 def _get_local_ip() -> str:
     """Return the local IP reachable from the LAN (for the Chromecast to fetch audio)."""
@@ -59,6 +63,7 @@ class ChromecastBackend(AudioBackend):
 
     def __init__(self, device: str | None = None):
         import pychromecast
+
         self._pychromecast = pychromecast
 
         print("[chromecast] Discovering devices…")
@@ -120,10 +125,8 @@ class ChromecastBackend(AudioBackend):
             time.sleep(0.3)
 
     def stop(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._cast.media_controller.stop()
-        except Exception:
-            pass
         self._stop_server()
 
     def close(self) -> None:
@@ -134,6 +137,7 @@ class ChromecastBackend(AudioBackend):
     @classmethod
     def list_devices(cls):
         import pychromecast
+
         print("[chromecast] Scanning network…")
         chromecasts, browser = pychromecast.get_chromecasts()
         if not chromecasts:

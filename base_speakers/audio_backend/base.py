@@ -1,5 +1,7 @@
-import numpy as np
 from abc import ABC, abstractmethod
+
+import numpy as np
+
 
 class AudioBackend(ABC):
     @abstractmethod
@@ -11,5 +13,5 @@ class AudioBackend(ABC):
     @abstractmethod
     def stop(self) -> None: ...
 
-    def close(self) -> None:
+    def close(self) -> None:  # noqa: B027
         pass

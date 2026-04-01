@@ -1,5 +1,7 @@
 import numpy as np
-from base_speakers.melody_config import NOTE_FREQS, MELODY
+
+from base_speakers.melody_config import MELODY, NOTE_FREQS
+
 
 def make_tone(freq: float, duration: float, sample_rate: int, volume: float = 0.5) -> np.ndarray:
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)

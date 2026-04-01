@@ -1,11 +1,14 @@
-from base_speakers.audio_backend.base import AudioBackend
 import numpy as np
+
+from base_speakers.audio_backend.base import AudioBackend
+
 
 class SoundDeviceBackend(AudioBackend):
     """Direct playback through PortAudio / sounddevice."""
 
     def __init__(self, device: str | int | None = None):
         import sounddevice as sd
+
         self._sd = sd
 
         if isinstance(device, str):
@@ -35,6 +38,7 @@ class SoundDeviceBackend(AudioBackend):
     @classmethod
     def list_devices(cls):
         import sounddevice as sd
+
         for i, dev in enumerate(sd.query_devices()):
             if dev["max_output_channels"] > 0:
                 print(f"  [{i}] {dev['name']}")
