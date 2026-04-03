@@ -8,6 +8,7 @@ Protocol (binary WebSocket):
 """
 
 import logging
+import time
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -32,10 +33,13 @@ async def video_stream(ws: WebSocket):
     await ws.accept()
     log.info("feed connected: %s", ws.client)
 
+    idx = 0
+    total_proc_ms = 0.0
     try:
         while True:
             data = await ws.receive_bytes()
 
+            t0 = time.monotonic()
             frame = decode_frame(data)
             if frame is None:
                 log.warning("failed to decode frame, skipping")
@@ -44,10 +48,29 @@ async def video_stream(ws: WebSocket):
             params = wek.process(frame)
             transformed = apply_transform(frame, **params)
             out_bytes = encode_frame(transformed)
+            proc_ms = (time.monotonic() - t0) * 1000
 
             await ws.send_bytes(out_bytes)
+
+            idx += 1
+            total_proc_ms += proc_ms
+            if idx % 100 == 0:
+                avg_ms = total_proc_ms / idx
+                log.info(
+                    "frame %d  proc: %.1fms (avg %.1fms)  size: %dx%d  out: %dKB",
+                    idx, proc_ms, avg_ms,
+                    frame.shape[1], frame.shape[0],
+                    len(out_bytes) // 1024,
+                )
     except WebSocketDisconnect:
-        log.info("feed disconnected: %s", ws.client)
+        if idx > 0:
+            avg_ms = total_proc_ms / idx
+            log.info(
+                "feed disconnected: %s  (%d frames, avg proc %.1fms)",
+                ws.client, idx, avg_ms,
+            )
+        else:
+            log.info("feed disconnected: %s", ws.client)
 
 
 def main():

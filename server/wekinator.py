@@ -51,12 +51,13 @@ class SimpleWekinator:
         means = frame_bgr.mean(axis=(0, 1))
         mean_b, mean_g, mean_r = means[0], means[1], means[2]
 
-        if self._prev_gray is not None:
-            diff = np.abs(gray.astype(np.float32) - self._prev_gray.astype(np.float32))
+        gray_f32 = gray.astype(np.float32)
+        if self._prev_gray is not None and self._prev_gray.shape == gray_f32.shape:
+            diff = np.abs(gray_f32 - self._prev_gray)
             motion = float(np.clip(diff.mean() / 40.0, 0.0, 1.0))
         else:
             motion = 0.0
-        self._prev_gray = gray.astype(np.float32)
+        self._prev_gray = gray_f32
 
         return np.array(
             [mean_brightness * 255, mean_r, mean_g, mean_b, motion], dtype=np.float64

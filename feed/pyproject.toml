@@ -6,7 +6,11 @@ dependencies = [
     "numpy",
     "sounddevice",
     "PyChromecast",
+    # Deps for test video
+    "opencv-python",
+    "websockets",
 ]
 
 [project.scripts]
 feed = "base_speakers.cli:main"
+test-video = "test_video:main"
