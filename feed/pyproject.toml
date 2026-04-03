@@ -1,0 +1,12 @@
+[project]
+name = "medziu-apsupty-feed"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "sounddevice",
+    "PyChromecast",
+]
+
+[project.scripts]
+feed = "base_speakers.cli:main"

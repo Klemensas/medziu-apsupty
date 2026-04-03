@@ -1,0 +1,42 @@
+---
+description: Overall project architecture — processing server and feed program
+alwaysApply: true
+---
+
+# Architecture
+
+The project has two main components that communicate over a network:
+
+## Feed Program
+
+- Runs on a lightweight edge device (e.g. Raspberry Pi 5) with an attached camera
+- Captures a live video feed and streams it to the processing server
+- Receives back processed video and audio output from the server
+- Drives local audio playback and video projection based on the server's response
+
+## Processing Server
+
+- Receives the video stream from the feed program
+- Runs detection/analysis models on the incoming frames (facial recognition, gesture detection, motion tracking, etc.)
+- Maps detection results into appropriate video and audio output
+- Streams the generated output back to the feed program
+
+## Data Flow
+
+```
+Feed Program                   Processing Server
+┌──────────┐   video stream    ┌──────────────┐
+│ camera   │ ───────────────▶  │ detection    │
+│          │                   │ models       │
+│ speakers │ ◀───────────────  │ (face,       │
+│ projector│   audio + video   │  gesture,    │
+└──────────┘   output          │  motion)     │
+                               └──────────────┘
+```
+
+## Guidelines
+
+- Keep feed-program code lightweight — heavy computation belongs on the server
+- Detection models and mapping logic live exclusively in the processing server
+- The feed program should be resilient to temporary network interruptions
+- Use clear interface boundaries between the two components (e.g. shared protocol definitions)

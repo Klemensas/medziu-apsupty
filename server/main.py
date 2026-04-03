@@ -1,0 +1,58 @@
+"""
+Processing server — receives JPEG frames over a WebSocket, applies a
+Wekinator-style visual transform, and streams the result back.
+
+Protocol (binary WebSocket):
+    client → server : raw JPEG bytes (one message per frame)
+    server → client : transformed JPEG bytes
+"""
+
+import logging
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from video_processor import apply_transform, decode_frame, encode_frame
+from wekinator import SimpleWekinator
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
+log = logging.getLogger("server")
+
+app = FastAPI(title="medziu-apsupty processing server")
+wek = SimpleWekinator()
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.websocket("/ws/video")
+async def video_stream(ws: WebSocket):
+    await ws.accept()
+    log.info("feed connected: %s", ws.client)
+
+    try:
+        while True:
+            data = await ws.receive_bytes()
+
+            frame = decode_frame(data)
+            if frame is None:
+                log.warning("failed to decode frame, skipping")
+                continue
+
+            params = wek.process(frame)
+            transformed = apply_transform(frame, **params)
+            out_bytes = encode_frame(transformed)
+
+            await ws.send_bytes(out_bytes)
+    except WebSocketDisconnect:
+        log.info("feed disconnected: %s", ws.client)
+
+
+def main():
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    main()

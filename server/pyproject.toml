@@ -1,0 +1,17 @@
+[project]
+name = "medziu-apsupty-server"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "opencv-python-headless",
+    "numpy",
+    "websockets",
+]
+
+[tool.setuptools]
+py-modules = ["main", "video_processor", "wekinator"]
+
+[project.scripts]
+server = "main:main"
