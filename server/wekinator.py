@@ -15,6 +15,7 @@ Output parameters (drive the video transform):
     brightness  float   [0.7, 1.3]  multiplicative brightness scale
 """
 
+import cv2
 import numpy as np
 
 NUM_FEATURES = 5
@@ -22,11 +23,8 @@ NUM_OUTPUTS = 3
 
 _WEIGHTS = np.array(
     [
-        # hue_shift: driven mainly by R-B colour difference
         [0.08, 0.15, -0.05, -0.15, 10.0],
-        # saturation: boosted by motion, lowered by high brightness
         [-0.002, 0.0, 0.0, 0.0, 1.0],
-        # brightness: slight lift when dark, dampen when bright
         [-0.002, 0.0, 0.0, 0.0, 0.3],
     ],
     dtype=np.float64,
@@ -45,22 +43,19 @@ class SimpleWekinator:
         self._prev_gray: np.ndarray | None = None
 
     def extract_features(self, frame_bgr: np.ndarray) -> np.ndarray:
-        gray = frame_bgr.mean(axis=2)
-        mean_brightness = gray.mean() / 255.0
+        mean_b, mean_g, mean_r, _ = cv2.mean(frame_bgr)
+        mean_brightness = (mean_b + mean_g + mean_r) / 3.0
 
-        means = frame_bgr.mean(axis=(0, 1))
-        mean_b, mean_g, mean_r = means[0], means[1], means[2]
-
-        gray_f32 = gray.astype(np.float32)
-        if self._prev_gray is not None and self._prev_gray.shape == gray_f32.shape:
-            diff = np.abs(gray_f32 - self._prev_gray)
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        if self._prev_gray is not None and self._prev_gray.shape == gray.shape:
+            diff = cv2.absdiff(gray, self._prev_gray)
             motion = float(np.clip(diff.mean() / 40.0, 0.0, 1.0))
         else:
             motion = 0.0
-        self._prev_gray = gray_f32
+        self._prev_gray = gray
 
         return np.array(
-            [mean_brightness * 255, mean_r, mean_g, mean_b, motion], dtype=np.float64
+            [mean_brightness, mean_r, mean_g, mean_b, motion], dtype=np.float64
         )
 
     def map(self, features: np.ndarray) -> dict[str, float]:

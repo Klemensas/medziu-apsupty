@@ -6,8 +6,7 @@ import numpy as np
 
 def decode_frame(data: bytes) -> np.ndarray | None:
     buf = np.frombuffer(data, dtype=np.uint8)
-    frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    return frame
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
 
 def apply_transform(
@@ -17,13 +16,18 @@ def apply_transform(
     saturation: float = 1.0,
     brightness: float = 1.0,
 ) -> np.ndarray:
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
 
-    hsv[:, :, 0] = (hsv[:, :, 0] + hue_shift) % 180
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation, 0, 255)
-    hsv[:, :, 2] = np.clip(hsv[:, :, 2] * brightness, 0, 255)
+    h, s, v = cv2.split(hsv)
+    if hue_shift != 0.0:
+        h = ((h.astype(np.int16) + int(hue_shift)) % 180).astype(np.uint8)
+    if saturation != 1.0:
+        s = cv2.multiply(s, saturation, dtype=cv2.CV_8U)
+    if brightness != 1.0:
+        v = cv2.multiply(v, brightness, dtype=cv2.CV_8U)
 
-    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    cv2.merge([h, s, v], dst=hsv)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
 def encode_frame(frame_bgr: np.ndarray, *, quality: int = 80) -> bytes:

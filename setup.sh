@@ -23,13 +23,17 @@ deactivate
 
 info "downloading models"
 mkdir -p "$ROOT/server/models"
-if [ ! -f "$ROOT/server/models/hand_landmarker.task" ]; then
-    curl -sL -o "$ROOT/server/models/hand_landmarker.task" \
-        "$MODELS_URL/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
-    echo "  hand_landmarker.task downloaded"
-else
-    echo "  hand_landmarker.task already exists, skipping"
-fi
+for model in \
+    "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task" \
+    "face_landmarker/face_landmarker/float16/latest/face_landmarker.task"; do
+    name="$(basename "$model")"
+    if [ ! -f "$ROOT/server/models/$name" ]; then
+        curl -sL -o "$ROOT/server/models/$name" "$MODELS_URL/$model"
+        echo "  $name downloaded"
+    else
+        echo "  $name already exists, skipping"
+    fi
+done
 
 # --- feed ---
 info "setting up feed"

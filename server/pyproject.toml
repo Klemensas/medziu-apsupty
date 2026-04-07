@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["main", "video_processor", "wekinator", "hand_tracker"]
+py-modules = ["main", "video_processor", "wekinator", "hand_tracker", "face_tracker"]
 
 [project.scripts]
 server = "main:main"

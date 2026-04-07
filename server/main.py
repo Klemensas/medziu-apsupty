@@ -13,6 +13,7 @@ import time
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from face_tracker import FaceTracker
 from hand_tracker import HandTracker
 from video_processor import apply_transform, decode_frame, encode_frame
 from wekinator import SimpleWekinator
@@ -23,6 +24,7 @@ log = logging.getLogger("server")
 app = FastAPI(title="medziu-apsupty processing server")
 wek = SimpleWekinator()
 hands = HandTracker()
+faces = FaceTracker()
 
 
 @app.get("/health")
@@ -47,10 +49,12 @@ async def video_stream(ws: WebSocket):
                 log.warning("failed to decode frame, skipping")
                 continue
 
-            tracking = hands.detect(frame)
+            hands.submit(frame)
+            faces.submit(frame)
             params = wek.process(frame)
             transformed = apply_transform(frame, **params)
-            transformed = hands.draw(transformed, tracking)
+            hands.draw(transformed, hands.latest())
+            faces.draw(transformed, faces.latest())
             out_bytes = encode_frame(transformed)
             proc_ms = (time.monotonic() - t0) * 1000
 
@@ -60,18 +64,30 @@ async def video_stream(ws: WebSocket):
             total_proc_ms += proc_ms
             if idx % 100 == 0:
                 avg_ms = total_proc_ms / idx
+                hs = hands.stats()
+                fs = faces.stats()
                 log.info(
-                    "frame %d  proc: %.1fms (avg %.1fms)  size: %dx%d  out: %dKB",
+                    "frame %d  proc: %.1fms (avg %.1fms)  size: %dx%d  out: %dKB"
+                    "  |  hands: %d/%d done (drop %d, avg %.1fms)"
+                    "  |  face: %d/%d done (drop %d, avg %.1fms)",
                     idx, proc_ms, avg_ms,
                     frame.shape[1], frame.shape[0],
                     len(out_bytes) // 1024,
+                    hs["processed"], hs["submitted"], hs["dropped"], hs["avg_detect_ms"],
+                    fs["processed"], fs["submitted"], fs["dropped"], fs["avg_detect_ms"],
                 )
     except WebSocketDisconnect:
         if idx > 0:
             avg_ms = total_proc_ms / idx
+            hs = hands.stats()
+            fs = faces.stats()
             log.info(
-                "feed disconnected: %s  (%d frames, avg proc %.1fms)",
+                "feed disconnected: %s  (%d frames, avg proc %.1fms)"
+                "  |  hands: %d/%d (drop %d, avg %.1fms)"
+                "  |  face: %d/%d (drop %d, avg %.1fms)",
                 ws.client, idx, avg_ms,
+                hs["processed"], hs["submitted"], hs["dropped"], hs["avg_detect_ms"],
+                fs["processed"], fs["submitted"], fs["dropped"], fs["avg_detect_ms"],
             )
         else:
             log.info("feed disconnected: %s", ws.client)
