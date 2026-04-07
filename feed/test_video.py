@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Test tool — reads a local video file, streams frames to the processing
-server over WebSocket, and displays the transformed output in a window.
+Test tool — reads a local video file or live camera feed, streams frames
+to the processing server over WebSocket, and displays the transformed
+output in a window.
 
-Uses ffmpeg as a subprocess for decode + scale + fps conversion so the
-Python side only handles lightweight JPEG encode (at 640x480) and display.
+Uses ffmpeg as a subprocess for video file decode + scale + fps conversion
+so the Python side only handles lightweight JPEG encode (at 640x480) and
+display.  For camera input, OpenCV's VideoCapture is used directly.
 
-A background reader thread drains ffmpeg continuously and keeps only the
-latest frame, so if the server can't keep up we skip stale frames instead
-of building up lag.
+A background reader thread drains the source continuously and keeps only
+the latest frame, so if the server can't keep up we skip stale frames
+instead of building up lag.
 
-Requires the [test] optional dependencies and ffmpeg on PATH:
+Requires the [test] optional dependencies and ffmpeg on PATH (for files):
     pip install -e ".[test]"
     brew install ffmpeg        # or apt install ffmpeg
 """
@@ -123,6 +125,49 @@ class FrameReader:
             return self._finished
 
 
+class CameraReader:
+    """Reads frames from a camera device in a background thread, keeping only the latest."""
+
+    def __init__(self, device: int) -> None:
+        self._cap = cv2.VideoCapture(device)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"cannot open camera device {device}")
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+        self._lock = threading.Lock()
+        self._latest: np.ndarray | None = None
+        self._finished = False
+        self._read_count = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            ret, frame = self._cap.read()
+            if not ret:
+                with self._lock:
+                    self._finished = True
+                return
+            frame = cv2.resize(frame, (WIDTH, HEIGHT))
+            with self._lock:
+                self._latest = frame
+                self._read_count += 1
+
+    def get(self) -> tuple[np.ndarray | None, int]:
+        with self._lock:
+            frame = self._latest
+            self._latest = None
+            return frame, self._read_count
+
+    @property
+    def finished(self) -> bool:
+        with self._lock:
+            return self._finished
+
+    def release(self) -> None:
+        self._cap.release()
+
+
 class FpsCounter:
     """Sliding-window FPS tracker."""
 
@@ -143,20 +188,12 @@ class FpsCounter:
         return (len(self._timestamps) - 1) / span if span > 0 else 0.0
 
 
-async def stream_video(video_path: str, server_url: str) -> None:
-    info = _probe_video(video_path)
-    est_total = info["est_output_frames"]
-    print(
-        f"source : {video_path}\n"
-        f"         {info['src_width']}x{info['src_height']} @ {info['src_fps']:.1f} fps"
-        f"  ({info['duration']:.1f}s, ~{info['nb_frames']} frames)\n"
-        f"output : {WIDTH}x{HEIGHT} @ {TARGET_FPS} fps  (~{est_total} frames)\n"
-        f"server : {server_url}\n"
-    )
-
-    proc = _open_ffmpeg(video_path)
-    frame_bytes = WIDTH * HEIGHT * 3
-    reader = FrameReader(proc.stdout, frame_bytes)
+async def _stream_loop(
+    reader: FrameReader | CameraReader,
+    server_url: str,
+    est_total: int | None = None,
+) -> None:
+    """Core streaming loop shared by file and camera modes."""
     counter = FpsCounter()
     sent = 0
     t_start = time.monotonic()
@@ -165,80 +202,73 @@ async def stream_video(video_path: str, server_url: str) -> None:
     total_decode_ms = 0.0
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
-    try:
-        async with websockets.connect(server_url, max_size=10 * 1024 * 1024) as ws:
-            print("connected — streaming (press q in window to stop)\n")
+    async with websockets.connect(server_url, max_size=10 * 1024 * 1024) as ws:
+        print("connected — streaming (press q in window to stop)\n")
 
-            while True:
-                frame, total_read = reader.get()
+        while True:
+            frame, total_read = reader.get()
 
-                if frame is None:
-                    if reader.finished:
-                        break
-                    await asyncio.sleep(0.001)
-                    continue
-
-                t_enc = time.monotonic()
-                ok, buf = cv2.imencode(".jpg", frame, encode_params)
-                if not ok:
-                    continue
-                jpeg_bytes = buf.tobytes()
-                encode_ms = (time.monotonic() - t_enc) * 1000
-                total_encode_ms += encode_ms
-
-                t_rtt = time.monotonic()
-                await ws.send(jpeg_bytes)
-                response = await ws.recv()
-                rtt_ms = (time.monotonic() - t_rtt) * 1000
-                total_rtt_ms += rtt_ms
-
-                t_dec = time.monotonic()
-                result = cv2.imdecode(
-                    np.frombuffer(response, dtype=np.uint8), cv2.IMREAD_COLOR
-                )
-                decode_ms = (time.monotonic() - t_dec) * 1000
-                total_decode_ms += decode_ms
-
-                counter.tick()
-                sent += 1
-                dropped = total_read - sent
-
-                if result is not None:
-                    current_fps = counter.fps()
-                    overlay = (
-                        f"fps: {current_fps:5.1f}  |  rtt: {rtt_ms:5.1f}ms"
-                        f"  |  enc: {encode_ms:4.1f}ms"
-                        f"  |  drop: {dropped}"
-                    )
-                    cv2.putText(
-                        result, overlay, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2,
-                    )
-                    cv2.imshow("server output", result)
-
-                if sent % 100 == 0:
-                    elapsed = time.monotonic() - t_start
-                    avg_fps = sent / elapsed
-                    print(
-                        f"  sent {sent:>6}  read {total_read:>6}/{est_total}"
-                        f"  drop {dropped}"
-                        f"   fps: {counter.fps():5.1f} (avg {avg_fps:.1f})"
-                        f"   rtt: {rtt_ms:.1f}ms (avg {total_rtt_ms / sent:.1f})"
-                        f"   enc: {encode_ms:.1f}ms (avg {total_encode_ms / sent:.1f})"
-                        f"   dec: {decode_ms:.1f}ms (avg {total_decode_ms / sent:.1f})"
-                        f"   out: {len(jpeg_bytes) // 1024}KB"
-                    )
-
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("\ninterrupted by user (q)")
+            if frame is None:
+                if reader.finished:
                     break
+                await asyncio.sleep(0.001)
+                continue
 
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\ninterrupted")
-    finally:
-        proc.terminate()
-        proc.wait()
-        cv2.destroyAllWindows()
+            t_enc = time.monotonic()
+            ok, buf = cv2.imencode(".jpg", frame, encode_params)
+            if not ok:
+                continue
+            jpeg_bytes = buf.tobytes()
+            encode_ms = (time.monotonic() - t_enc) * 1000
+            total_encode_ms += encode_ms
+
+            t_rtt = time.monotonic()
+            await ws.send(jpeg_bytes)
+            response = await ws.recv()
+            rtt_ms = (time.monotonic() - t_rtt) * 1000
+            total_rtt_ms += rtt_ms
+
+            t_dec = time.monotonic()
+            result = cv2.imdecode(
+                np.frombuffer(response, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            decode_ms = (time.monotonic() - t_dec) * 1000
+            total_decode_ms += decode_ms
+
+            counter.tick()
+            sent += 1
+            dropped = total_read - sent
+
+            if result is not None:
+                current_fps = counter.fps()
+                overlay = (
+                    f"fps: {current_fps:5.1f}  |  rtt: {rtt_ms:5.1f}ms"
+                    f"  |  enc: {encode_ms:4.1f}ms"
+                    f"  |  drop: {dropped}"
+                )
+                cv2.putText(
+                    result, overlay, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2,
+                )
+                cv2.imshow("server output", result)
+
+            if sent % 100 == 0:
+                elapsed = time.monotonic() - t_start
+                avg_fps = sent / elapsed
+                total_label = f"/{est_total}" if est_total else ""
+                print(
+                    f"  sent {sent:>6}  read {total_read:>6}{total_label}"
+                    f"  drop {dropped}"
+                    f"   fps: {counter.fps():5.1f} (avg {avg_fps:.1f})"
+                    f"   rtt: {rtt_ms:.1f}ms (avg {total_rtt_ms / sent:.1f})"
+                    f"   enc: {encode_ms:.1f}ms (avg {total_encode_ms / sent:.1f})"
+                    f"   dec: {decode_ms:.1f}ms (avg {total_decode_ms / sent:.1f})"
+                    f"   out: {len(jpeg_bytes) // 1024}KB"
+                )
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("\ninterrupted by user (q)")
+                break
 
     elapsed = time.monotonic() - t_start
     _, total_read = reader.get()
@@ -253,11 +283,61 @@ async def stream_video(video_path: str, server_url: str) -> None:
         )
 
 
+async def stream_video(video_path: str, server_url: str) -> None:
+    info = _probe_video(video_path)
+    est_total = info["est_output_frames"]
+    print(
+        f"source : {video_path}\n"
+        f"         {info['src_width']}x{info['src_height']} @ {info['src_fps']:.1f} fps"
+        f"  ({info['duration']:.1f}s, ~{info['nb_frames']} frames)\n"
+        f"output : {WIDTH}x{HEIGHT} @ {TARGET_FPS} fps  (~{est_total} frames)\n"
+        f"server : {server_url}\n"
+    )
+
+    proc = _open_ffmpeg(video_path)
+    frame_bytes = WIDTH * HEIGHT * 3
+    reader = FrameReader(proc.stdout, frame_bytes)
+
+    try:
+        await _stream_loop(reader, server_url, est_total=est_total)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\ninterrupted")
+    finally:
+        proc.terminate()
+        proc.wait()
+        cv2.destroyAllWindows()
+
+
+async def stream_camera(device: int, server_url: str) -> None:
+    print(
+        f"source : camera {device}\n"
+        f"output : {WIDTH}x{HEIGHT}\n"
+        f"server : {server_url}\n"
+    )
+
+    reader = CameraReader(device)
+
+    try:
+        await _stream_loop(reader, server_url)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\ninterrupted")
+    finally:
+        reader.release()
+        cv2.destroyAllWindows()
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Send a video file to the processing server and display the result",
+        description="Stream a video file or live camera feed to the processing server",
     )
-    p.add_argument("video", help="path to the video file")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("video", nargs="?", default=None, help="path to a video file")
+    source.add_argument(
+        "-c", "--camera",
+        type=int,
+        metavar="DEVICE",
+        help="use a camera device index (e.g. 0 for the default webcam)",
+    )
     p.add_argument(
         "--server",
         default="ws://localhost:8000/ws/video",
@@ -267,16 +347,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        print("error: ffmpeg and ffprobe must be installed and on PATH")
-        raise SystemExit(1)
-
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     args = parse_args()
-    try:
-        asyncio.run(stream_video(args.video, args.server))
-    except KeyboardInterrupt:
-        pass
+
+    if args.camera is not None:
+        try:
+            asyncio.run(stream_camera(args.camera, args.server))
+        except KeyboardInterrupt:
+            pass
+    else:
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            print("error: ffmpeg and ffprobe must be installed and on PATH")
+            raise SystemExit(1)
+        try:
+            asyncio.run(stream_video(args.video, args.server))
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
