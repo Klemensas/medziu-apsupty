@@ -8,10 +8,11 @@ dependencies = [
     "opencv-python-headless",
     "numpy",
     "websockets",
+    "mediapipe",
 ]
 
 [tool.setuptools]
-py-modules = ["main", "video_processor", "wekinator"]
+py-modules = ["main", "video_processor", "wekinator", "hand_tracker"]
 
 [project.scripts]
 server = "main:main"

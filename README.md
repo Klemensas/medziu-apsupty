@@ -11,18 +11,17 @@ server/     Processing server  — detection models + Wekinator-style mapping
 
 Each component is an independent Python package with its own virtual environment.
 
-## Processing server
-
-Receives a live video stream over WebSocket, applies a Wekinator-style feature→effect mapping, and streams the transformed video back.
-
-### Setup
+## Quick start
 
 ```bash
-cd server
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+./setup.sh
 ```
+
+This creates virtual environments for both components, installs all dependencies, and downloads required ML models. Requires Python 3.12+, curl, and (optionally) ffmpeg for the feed test tool. Override the Python binary with `PYTHON=python3.12 ./setup.sh` if needed.
+
+## Processing server
+
+Receives a live video stream over WebSocket, applies a Wekinator-style feature→effect mapping with MediaPipe hand tracking, and streams the transformed video back.
 
 ### Run
 
@@ -39,15 +38,6 @@ A health-check endpoint is available at `GET /health`.
 ## Feed program
 
 Runs on an edge device (e.g. Raspberry Pi 5). Currently contains a speaker test that plays a melody on loop via direct audio output or Chromecast.
-
-### Setup
-
-```bash
-cd feed
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
 
 ### Run
 

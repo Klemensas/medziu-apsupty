@@ -13,6 +13,7 @@ import time
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from hand_tracker import HandTracker
 from video_processor import apply_transform, decode_frame, encode_frame
 from wekinator import SimpleWekinator
 
@@ -21,6 +22,7 @@ log = logging.getLogger("server")
 
 app = FastAPI(title="medziu-apsupty processing server")
 wek = SimpleWekinator()
+hands = HandTracker()
 
 
 @app.get("/health")
@@ -45,8 +47,10 @@ async def video_stream(ws: WebSocket):
                 log.warning("failed to decode frame, skipping")
                 continue
 
+            tracking = hands.detect(frame)
             params = wek.process(frame)
             transformed = apply_transform(frame, **params)
+            transformed = hands.draw(transformed, tracking)
             out_bytes = encode_frame(transformed)
             proc_ms = (time.monotonic() - t0) * 1000
 
