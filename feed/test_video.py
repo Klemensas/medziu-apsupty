@@ -52,7 +52,7 @@ def _probe_video(path: str) -> dict:
     fmt = data.get("format", {})
 
     num, den = stream.get("r_frame_rate", "30/1").split("/")
-    src_fps = int(num) / int(den) if int(den) else 30.0
+    src_fps = int(num) / int(den)
 
     duration = float(stream.get("duration") or fmt.get("duration") or 0)
     nb_frames = int(stream.get("nb_frames") or 0)
@@ -140,6 +140,8 @@ class CameraReader:
         self._read_count = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+        self.src_fps = self._cap.get(cv2.CAP_PROP_FPS)
 
     def _run(self) -> None:
         while True:
@@ -309,13 +311,12 @@ async def stream_video(video_path: str, server_url: str) -> None:
 
 
 async def stream_camera(device: int, server_url: str) -> None:
+    reader = CameraReader(device)
     print(
-        f"source : camera {device}\n"
+        f"source : camera {device} @ {reader.src_fps:.0f} fps\n"
         f"output : {WIDTH}x{HEIGHT}\n"
         f"server : {server_url}\n"
     )
-
-    reader = CameraReader(device)
 
     try:
         await _stream_loop(reader, server_url)
