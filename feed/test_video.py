@@ -22,18 +22,120 @@ import asyncio
 import json
 import shutil
 import signal
+import struct
 import subprocess
 import threading
 import time
 
 import cv2
 import numpy as np
+import sounddevice as sd
 import websockets
+from pythonosc.dispatcher import Dispatcher
+from pythonosc.osc_server import ThreadingOSCUDPServer
+
+from base_speakers.melody import make_tone
 
 WIDTH = 640
 HEIGHT = 480
 TARGET_FPS = 30
 JPEG_QUALITY = 80
+
+SAMPLE_RATE = 44100
+OSC_PORT = 9000
+
+
+class BeatPlayer:
+    """Looping audio player driven by OSC beat data.
+
+    Synthesises a melody from note frequencies/durations and loops it
+    through a sounddevice OutputStream.  Thread-safe: ``update()`` can
+    be called from the OSC handler thread at any time.
+    """
+
+    def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
+        self._sr = sample_rate
+        self._lock = threading.Lock()
+        self._melody = np.zeros(0, dtype=np.float32)
+        self._pos = 0
+        self._volume = 0.5
+        self._active = False
+        self._stream = sd.OutputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=self._callback,
+            blocksize=1024,
+        )
+        self._stream.start()
+
+    def _callback(self, outdata: np.ndarray, frames: int, _time, _status) -> None:
+        with self._lock:
+            mel = self._melody
+            if not self._active or len(mel) == 0:
+                outdata[:] = 0.0
+                return
+            out = np.empty(frames, dtype=np.float32)
+            written = 0
+            pos = self._pos
+            while written < frames:
+                chunk = min(frames - written, len(mel) - pos)
+                out[written : written + chunk] = mel[pos : pos + chunk]
+                pos = (pos + chunk) % len(mel)
+                written += chunk
+            self._pos = pos
+        outdata[:, 0] = out
+
+    def update(self, notes: list[dict], volume: float) -> None:
+        """Rebuild the melody from a list of ``{freq, duration}`` dicts."""
+        if not notes or volume <= 0:
+            with self._lock:
+                self._active = False
+                self._melody = np.zeros(0, dtype=np.float32)
+                self._pos = 0
+            return
+
+        samples = [
+            make_tone(n["freq"], n["duration"], self._sr, volume)
+            for n in notes
+        ]
+        melody = np.concatenate(samples).astype(np.float32)
+        with self._lock:
+            self._melody = melody
+            self._pos = 0
+            self._volume = volume
+            self._active = True
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return self._active
+
+    def stop(self) -> None:
+        self._stream.stop()
+        self._stream.close()
+
+
+def _start_osc_listener(player: BeatPlayer, port: int = OSC_PORT) -> ThreadingOSCUDPServer:
+    """Start a background OSC server that routes /beat messages to *player*."""
+
+    def _handle_beat(_address: str, *args) -> None:
+        active = bool(args[0]) if len(args) > 0 else False
+        volume = float(args[3]) if len(args) > 3 else 0.0
+        notes_json = args[4] if len(args) > 4 else "[]"
+
+        if active:
+            notes = json.loads(notes_json)
+            player.update(notes, volume)
+        else:
+            player.update([], 0.0)
+
+    dispatcher = Dispatcher()
+    dispatcher.map("/beat", _handle_beat)
+    server = ThreadingOSCUDPServer(("0.0.0.0", port), dispatcher)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
 
 
 def _probe_video(path: str) -> dict:
@@ -190,9 +292,26 @@ class FpsCounter:
         return (len(self._timestamps) - 1) / span if span > 0 else 0.0
 
 
+def _unpack_response(data: bytes) -> tuple[bytes, dict]:
+    """Decode the server's framed response.
+
+    Format: [4B video_len (uint32 BE)][video_len B JPEG][rest: JSON metadata]
+
+    Returns ``(jpeg_bytes, metadata_dict)``.
+    """
+    if len(data) < 4:
+        return data, {}
+    video_len = struct.unpack("!I", data[:4])[0]
+    jpeg_bytes = data[4 : 4 + video_len]
+    tail = data[4 + video_len :]
+    meta = json.loads(tail) if tail else {}
+    return jpeg_bytes, meta
+
+
 async def _stream_loop(
     reader: FrameReader | CameraReader,
     server_url: str,
+    player: BeatPlayer,
     est_total: int | None = None,
 ) -> None:
     """Core streaming loop shared by file and camera modes."""
@@ -231,11 +350,14 @@ async def _stream_loop(
             total_rtt_ms += rtt_ms
 
             t_dec = time.monotonic()
+            video_data, meta = _unpack_response(response)
             result = cv2.imdecode(
-                np.frombuffer(response, dtype=np.uint8), cv2.IMREAD_COLOR
+                np.frombuffer(video_data, dtype=np.uint8), cv2.IMREAD_COLOR
             )
             decode_ms = (time.monotonic() - t_dec) * 1000
             total_decode_ms += decode_ms
+
+            beat = meta.get("beat")
 
             counter.tick()
             sent += 1
@@ -252,6 +374,22 @@ async def _stream_loop(
                     result, overlay, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2,
                 )
+                if beat and beat.get("active"):
+                    beat_label = (
+                        f"Beat: {beat.get('emotion', '?')} "
+                        f"{beat.get('tempo_bpm', 0):.0f}bpm "
+                        f"vol={beat.get('volume', 0):.0%}"
+                    )
+                    color = (0, 220, 200) if player.active else (0, 100, 100)
+                    cv2.putText(
+                        result, beat_label, (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                    )
+                    audio_tag = "PLAYING" if player.active else "MUTED"
+                    cv2.putText(
+                        result, audio_tag, (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1,
+                    )
                 cv2.imshow("server output", result)
 
             if sent % 100 == 0:
@@ -266,6 +404,7 @@ async def _stream_loop(
                     f"   enc: {encode_ms:.1f}ms (avg {total_encode_ms / sent:.1f})"
                     f"   dec: {decode_ms:.1f}ms (avg {total_decode_ms / sent:.1f})"
                     f"   out: {len(jpeg_bytes) // 1024}KB"
+                    f"   audio: {'on' if player.active else 'off'}"
                 )
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -296,17 +435,23 @@ async def stream_video(video_path: str, server_url: str) -> None:
         f"server : {server_url}\n"
     )
 
+    player = BeatPlayer()
+    osc_server = _start_osc_listener(player)
+    print(f"OSC listener on :{OSC_PORT}  |  audio via sounddevice\n")
+
     proc = _open_ffmpeg(video_path)
     frame_bytes = WIDTH * HEIGHT * 3
     reader = FrameReader(proc.stdout, frame_bytes)
 
     try:
-        await _stream_loop(reader, server_url, est_total=est_total)
+        await _stream_loop(reader, server_url, player, est_total=est_total)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\ninterrupted")
     finally:
         proc.terminate()
         proc.wait()
+        player.stop()
+        osc_server.shutdown()
         cv2.destroyAllWindows()
 
 
@@ -318,12 +463,18 @@ async def stream_camera(device: int, server_url: str) -> None:
         f"server : {server_url}\n"
     )
 
+    player = BeatPlayer()
+    osc_server = _start_osc_listener(player)
+    print(f"OSC listener on :{OSC_PORT}  |  audio via sounddevice\n")
+
     try:
-        await _stream_loop(reader, server_url)
+        await _stream_loop(reader, server_url, player)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\ninterrupted")
     finally:
         reader.release()
+        player.stop()
+        osc_server.shutdown()
         cv2.destroyAllWindows()
 
 

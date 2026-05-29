@@ -6,6 +6,7 @@ dependencies = [
     "numpy",
     "sounddevice",
     "PyChromecast",
+    "python-osc",
     # Deps for test video
     "opencv-python",
     "websockets",
